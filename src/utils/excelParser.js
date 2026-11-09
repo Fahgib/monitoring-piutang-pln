@@ -18,7 +18,7 @@ export const DAFTAR_BULAN = [
 ];
 
 // Deteksi otomatis Bulan dari nama file Excel yang diunggah
-export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Juli 2026') {
+export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Oktober 2026') {
   const lower = fileName.toLowerCase();
   const mapBulan = [
     { keys: ['januari', 'jan', '2101', '21125', '0125', '0126'], label: 'Januari 2026' },
@@ -30,7 +30,7 @@ export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Juli 202
     { keys: ['juli', 'jul', '2107', '21725', '0725', '725', '0726'], label: 'Juli 2026' },
     { keys: ['agustus', 'agu', 'aug', '2108', '21825', '0825', '825', '0826'], label: 'Agustus 2026' },
     { keys: ['september', 'sep', '2109', '21925', '0925', '0926'], label: 'September 2026' },
-    { keys: ['oktober', 'okt', 'oct', '2110', '1025', '1026'], label: 'Oktober 2026' },
+    { keys: ['oktober', 'okt', 'oct', '2110', '211025', '1025', '1026'], label: 'Oktober 2026' },
     { keys: ['november', 'nov', '2111', '1125', '1126'], label: 'November 2026' },
     { keys: ['desember', 'des', 'dec', '2112', '1225', '1226'], label: 'Desember 2026' },
   ];
@@ -64,50 +64,81 @@ function convertExcelDate(val) {
   return String(val).trim();
 }
 
+// Cari baris header (mendukung nama kolom IDPEL, ID PELANGGAN, NAMA, RPTAG)
 function extractRowsFromSheet(worksheet) {
   const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
-  let headerIdx = 0;
+  if (!rawRows || rawRows.length === 0) return [];
 
-  for (let i = 0; i < Math.min(rawRows.length, 25); i++) {
-    const rowStr = rawRows[i].map((c) => String(c).trim().toUpperCase());
-    if (rowStr.includes('IDPEL') || rowStr.includes('NAMA')) {
+  let headerIdx = -1;
+
+  for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
+    const rowStr = (rawRows[i] || []).map((c) => String(c).trim().toUpperCase());
+    if (
+      rowStr.includes('IDPEL') ||
+      rowStr.includes('ID PELANGGAN') ||
+      (rowStr.includes('NAMA') && rowStr.includes('TARIF'))
+    ) {
       headerIdx = i;
       break;
     }
   }
 
-  const headers = rawRows[headerIdx]?.map((h) => String(h).trim().toUpperCase()) || [];
+  // Jika sheet tidak memiliki tabel pelanggan, lewati
+  if (headerIdx === -1) return [];
+
+  const headers = (rawRows[headerIdx] || []).map((h) =>
+    String(h).trim().toUpperCase().replace(/\s+/g, ' ')
+  );
   const dataRows = [];
-  const maxLimit = Math.min(rawRows.length, headerIdx + 4500);
+
+  // Membaca hingga 25.000 baris per sheet agar seluruh pelanggan NON AMR masuk utuh
+  const maxLimit = Math.min(rawRows.length, headerIdx + 25000);
 
   for (let r = headerIdx + 1; r < maxLimit; r++) {
     const row = rawRows[r];
     if (!row || row.length === 0) continue;
     const obj = {};
-    headers.forEach((h, idx) => {
-      if (h) obj[h] = row[idx];
-    });
-    const idpel = String(obj['IDPEL'] || '').trim();
-    if (idpel && idpel.length >= 6) {
+    for (let c = 0; c < headers.length; c++) {
+      const h = headers[c];
+      if (h) obj[h] = row[c];
+    }
+    const rawIdpel = obj['IDPEL'] ?? obj['ID PELANGGAN'] ?? '';
+    const idpel = String(rawIdpel).trim().replace(/\.0$/, '');
+    if (/^\d{6,15}$/.test(idpel)) {
+      obj['IDPEL'] = idpel;
       dataRows.push(obj);
     }
   }
   return dataRows;
 }
 
+// Bersihkan format angka apabila di Excel terdapat titik/koma atau Rp
+function parseNumberClean(val) {
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  if (!val) return 0;
+  const cleaned = String(val).replace(/[^0-9.-]+/g, '');
+  return Number(cleaned) || 0;
+}
+
 function normalizeCustomerRow(raw, sheetName, category, bulanFile) {
   const idpel = String(raw['IDPEL'] || '').trim();
   const nama = String(raw['NAMA'] || raw['NAMA PELANGGAN'] || '-').trim();
   const tarif = String(raw['TARIF'] || raw['TRF'] || '-').trim();
-  const daya = Number(raw['DAYA']) || 0;
+  const daya = parseNumberClean(raw['DAYA']);
   const alamat = String(raw['ALAMAT'] || '-').trim();
   const rbm = String(raw['RBM'] || raw['NO RBM'] || '-').trim();
   const kdpemda = String(raw['KDPEMDA'] || '').trim();
   const gardu = String(raw['GARDU'] || '-').trim();
-  const lembar = Number(raw['LEMBAR'] || raw['LBR']) || (category === 'tiga_lembar' ? 3 : category === 'dua_lembar' ? 2 : 1);
-  const rptag = Number(raw['RPTAG']) || 0;
-  const rpbk = Number(raw['RPBK']) || 0;
-  const rptot = Number(raw['RP TOT'] || raw['RPTOT'] || raw['TOTAL']) || (rptag + rpbk);
+  const lembar =
+    parseNumberClean(raw['LEMBAR'] || raw['LBR']) ||
+    (category === 'tiga_lembar' ? 3 : category === 'dua_lembar' ? 2 : 1);
+
+  const rptag = parseNumberClean(raw['RPTAG'] || raw['RP TAG'] || raw['TAGIHAN']);
+  const rpbk = parseNumberClean(raw['RPBK'] || raw['RP BK'] || raw['BK']);
+  const rptotRaw = parseNumberClean(
+    raw['RP TOT'] || raw['RPTOT'] || raw['TOTAL'] || raw['TOT'] || raw['JUMLAH']
+  );
+  const rptot = rptotRaw > 0 ? rptotRaw : rptag + rpbk;
 
   const ketRaw = String(raw['KET'] || raw['KETERANGAN'] || raw['STATUS'] || '').trim();
   const tglLunasRaw = raw['TANGGAL LUNAS'] || raw['TGL LUNAS'] || '';
@@ -115,13 +146,20 @@ function normalizeCustomerRow(raw, sheetName, category, bulanFile) {
   const eksekusiExcel = String(raw['EKSEKUSI'] || '').trim();
 
   const isLunasExcel =
-    ketRaw.toUpperCase().includes('LUNAS') ||
-    Boolean(tglLunasParsed);
+    ketRaw.toUpperCase().includes('LUNAS') || Boolean(tglLunasParsed);
 
+  // PERBAIKAN PENTING: Cek "NON" terlebih dahulu agar sheet "NON AMR" tidak salah masuk ke "AMR"
   let jenisMeter = 'NON AMR';
-  const sUpper = sheetName.toUpperCase();
-  if (sUpper.includes('AMI') || rbm.includes('AMI')) jenisMeter = 'AMI';
-  else if (sUpper.includes('AMR') || rbm.includes('AMR')) jenisMeter = 'AMR';
+  const sUpper = sheetName.toUpperCase().trim();
+  const rbmUpper = rbm.toUpperCase();
+
+  if (sUpper.includes('NON')) {
+    jenisMeter = 'NON AMR';
+  } else if (sUpper.includes('AMI') || rbmUpper.includes('AMI')) {
+    jenisMeter = 'AMI';
+  } else if (sUpper === 'AMR' || sUpper.includes('AMR') || rbmUpper.includes('AMR')) {
+    jenisMeter = 'AMR';
+  }
 
   return {
     idpel,
@@ -140,7 +178,9 @@ function normalizeCustomerRow(raw, sheetName, category, bulanFile) {
     daerah: detectDaerah(alamat, kdpemda, rbm),
     ket: ketRaw,
     statusLunas: isLunasExcel,
-    tanggalLunas: isLunasExcel ? (tglLunasParsed || new Date().toISOString().slice(0, 10)) : null,
+    tanggalLunas: isLunasExcel
+      ? tglLunasParsed || new Date().toISOString().slice(0, 10)
+      : null,
     eksekusi: eksekusiExcel || (jenisMeter === 'AMR' ? 'Modem Off' : 'Shuntrip'),
     lat: raw['LAT'] || '',
     lng: raw['LNG'] || '',
@@ -158,7 +198,7 @@ export async function parseExcelFile(file, forcedCategory = null, chosenMonth = 
     const category = forcedCategory || detectFileCategory(file.name, sheetNames);
     const bulanFile =
       !chosenMonth || chosenMonth === 'AUTO'
-        ? detectMonthFromFileName(file.name, 'Juli 2026')
+        ? detectMonthFromFileName(file.name, 'Oktober 2026')
         : chosenMonth;
 
     const byIdpel = new Map();
@@ -198,7 +238,10 @@ export async function parseExcelFile(file, forcedCategory = null, chosenMonth = 
       category,
       bulan: bulanFile,
       fileName: file.name,
-      uploadedAt: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+      uploadedAt: new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
       sheetNames,
       totalRows: records.length,
       records,
@@ -209,7 +252,11 @@ export async function parseExcelFile(file, forcedCategory = null, chosenMonth = 
   }
 }
 
-export async function parseGoogleSheetCsvUrl(csvUrl, category = 'belum_lunas', bulanFile = 'Juli 2026') {
+export async function parseGoogleSheetCsvUrl(
+  csvUrl,
+  category = 'belum_lunas',
+  bulanFile = 'Oktober 2026'
+) {
   return new Promise((resolve, reject) => {
     Papa.parse(csvUrl, {
       download: true,
@@ -223,7 +270,9 @@ export async function parseGoogleSheetCsvUrl(csvUrl, category = 'belum_lunas', b
             upperRaw[k.trim().toUpperCase()] = raw[k];
           });
           if (upperRaw['IDPEL']) {
-            records.push(normalizeCustomerRow(upperRaw, 'GoogleSheet', category, bulanFile));
+            records.push(
+              normalizeCustomerRow(upperRaw, 'GoogleSheet', category, bulanFile)
+            );
           }
         });
         resolve({
@@ -231,7 +280,10 @@ export async function parseGoogleSheetCsvUrl(csvUrl, category = 'belum_lunas', b
           category,
           bulan: bulanFile,
           fileName: 'Google Spreadsheet (Live)',
-          uploadedAt: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+          uploadedAt: new Date().toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
           sheetNames: ['Live Sheet'],
           totalRows: records.length,
           records,
