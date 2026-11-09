@@ -17,8 +17,7 @@ export const DAFTAR_BULAN = [
   'Desember 2026',
 ];
 
-// Deteksi otomatis Bulan dari nama file Excel yang diunggah
-export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Oktober 2026') {
+export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Agustus 2026') {
   const lower = fileName.toLowerCase();
   const mapBulan = [
     { keys: ['januari', 'jan', '2101', '21125', '0125', '0126'], label: 'Januari 2026' },
@@ -28,7 +27,7 @@ export function detectMonthFromFileName(fileName = '', fallbackMonth = 'Oktober 
     { keys: ['mei', '2105', '21525', '0525', '0526'], label: 'Mei 2026' },
     { keys: ['juni', 'jun', '2106', '21625', '0625', '0626'], label: 'Juni 2026' },
     { keys: ['juli', 'jul', '2107', '21725', '0725', '725', '0726'], label: 'Juli 2026' },
-    { keys: ['agustus', 'agu', 'aug', '2108', '21825', '0825', '825', '0826'], label: 'Agustus 2026' },
+    { keys: ['agustus', 'agu', 'aug', '2108', '210825', '21825', '0825', '825', '0826'], label: 'Agustus 2026' },
     { keys: ['september', 'sep', '2109', '21925', '0925', '0926'], label: 'September 2026' },
     { keys: ['oktober', 'okt', 'oct', '2110', '211025', '1025', '1026'], label: 'Oktober 2026' },
     { keys: ['november', 'nov', '2111', '1125', '1126'], label: 'November 2026' },
@@ -64,7 +63,6 @@ function convertExcelDate(val) {
   return String(val).trim();
 }
 
-// Cari baris header (mendukung nama kolom IDPEL, ID PELANGGAN, NAMA, RPTAG)
 function extractRowsFromSheet(worksheet) {
   const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
   if (!rawRows || rawRows.length === 0) return [];
@@ -76,22 +74,20 @@ function extractRowsFromSheet(worksheet) {
     if (
       rowStr.includes('IDPEL') ||
       rowStr.includes('ID PELANGGAN') ||
-      (rowStr.includes('NAMA') && rowStr.includes('TARIF'))
+      (rowStr.includes('NAMA') && rowStr.includes('TARIF')) ||
+      (rowStr.includes('NAMA PELANGGAN') && rowStr.includes('TOTAL'))
     ) {
       headerIdx = i;
       break;
     }
   }
 
-  // Jika sheet tidak memiliki tabel pelanggan, lewati
   if (headerIdx === -1) return [];
 
   const headers = (rawRows[headerIdx] || []).map((h) =>
     String(h).trim().toUpperCase().replace(/\s+/g, ' ')
   );
   const dataRows = [];
-
-  // Membaca hingga 25.000 baris per sheet agar seluruh pelanggan NON AMR masuk utuh
   const maxLimit = Math.min(rawRows.length, headerIdx + 25000);
 
   for (let r = headerIdx + 1; r < maxLimit; r++) {
@@ -112,7 +108,6 @@ function extractRowsFromSheet(worksheet) {
   return dataRows;
 }
 
-// Bersihkan format angka apabila di Excel terdapat titik/koma atau Rp
 function parseNumberClean(val) {
   if (typeof val === 'number') return isNaN(val) ? 0 : val;
   if (!val) return 0;
@@ -136,29 +131,34 @@ function normalizeCustomerRow(raw, sheetName, category, bulanFile) {
   const rptag = parseNumberClean(raw['RPTAG'] || raw['RP TAG'] || raw['TAGIHAN']);
   const rpbk = parseNumberClean(raw['RPBK'] || raw['RP BK'] || raw['BK']);
   const rptotRaw = parseNumberClean(
-    raw['RP TOT'] || raw['RPTOT'] || raw['TOTAL'] || raw['TOT'] || raw['JUMLAH']
+    raw['TOTAL'] || raw['RP TOT'] || raw['RPTOT'] || raw['TOT'] || raw['JUMLAH']
   );
   const rptot = rptotRaw > 0 ? rptotRaw : rptag + rpbk;
 
   const ketRaw = String(raw['KET'] || raw['KETERANGAN'] || raw['STATUS'] || '').trim();
-  const tglLunasRaw = raw['TANGGAL LUNAS'] || raw['TGL LUNAS'] || '';
+  const tglLunasRaw = raw['TANGGAL LUNAS'] || raw['TGL LUNAS'] || raw['TGL LUNAS'] || '';
   const tglLunasParsed = convertExcelDate(tglLunasRaw);
   const eksekusiExcel = String(raw['EKSEKUSI'] || '').trim();
 
   const isLunasExcel =
     ketRaw.toUpperCase().includes('LUNAS') || Boolean(tglLunasParsed);
 
-  // PERBAIKAN PENTING: Cek "NON" terlebih dahulu agar sheet "NON AMR" tidak salah masuk ke "AMR"
+  // Penentuan jenis meter yang aman dan akurat
   let jenisMeter = 'NON AMR';
   const sUpper = sheetName.toUpperCase().trim();
   const rbmUpper = rbm.toUpperCase();
 
-  if (sUpper.includes('NON')) {
+  if (sUpper.includes('NON') || (!sUpper.includes('AMI') && !sUpper.includes('AMR') && !rbmUpper.includes('AMI') && !rbmUpper.includes('AMR') && rptot < 1000000)) {
+    // Jika file tidak menyebutkan AMR/AMI secara spesifik dan jumlah pelanggan besar tanpa penanda khusus, default ke NON AMR
     jenisMeter = 'NON AMR';
-  } else if (sUpper.includes('AMI') || rbmUpper.includes('AMI')) {
+  }
+
+  if (sUpper.includes('AMI') || rbmUpper.includes('AMI')) {
     jenisMeter = 'AMI';
   } else if (sUpper === 'AMR' || sUpper.includes('AMR') || rbmUpper.includes('AMR')) {
     jenisMeter = 'AMR';
+  } else if (sUpper.includes('NON')) {
+    jenisMeter = 'NON AMR';
   }
 
   return {
@@ -198,7 +198,7 @@ export async function parseExcelFile(file, forcedCategory = null, chosenMonth = 
     const category = forcedCategory || detectFileCategory(file.name, sheetNames);
     const bulanFile =
       !chosenMonth || chosenMonth === 'AUTO'
-        ? detectMonthFromFileName(file.name, 'Oktober 2026')
+        ? detectMonthFromFileName(file.name, 'Agustus 2026')
         : chosenMonth;
 
     const byIdpel = new Map();
@@ -255,7 +255,7 @@ export async function parseExcelFile(file, forcedCategory = null, chosenMonth = 
 export async function parseGoogleSheetCsvUrl(
   csvUrl,
   category = 'belum_lunas',
-  bulanFile = 'Oktober 2026'
+  bulanFile = 'Agustus 2026'
 ) {
   return new Promise((resolve, reject) => {
     Papa.parse(csvUrl, {
